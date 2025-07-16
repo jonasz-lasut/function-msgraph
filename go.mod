@@ -13,7 +13,7 @@ require (
 	github.com/microsoft/kiota-authentication-azure-go v1.3.0
 	github.com/microsoftgraph/msgraph-sdk-go v1.74.0
 	google.golang.org/protobuf v1.36.6
-	k8s.io/apimachinery v0.33.1
+	k8s.io/apimachinery v0.33.3
 	sigs.k8s.io/controller-tools v0.18.0
 )
 
