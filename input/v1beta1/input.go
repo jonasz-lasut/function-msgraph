@@ -66,4 +66,24 @@ type Input struct {
 	// Default is false to ensure continuous reconciliation
 	// +optional
 	SkipQueryWhenTargetHasData *bool `json:"skipQueryWhenTargetHasData,omitempty"`
+
+	// Identity defines the type of identity used for authentication to the Microsoft Graph API.
+	Identity *Identity `json:"identity,omitempty"`
 }
+
+// Identity defines the type of identity used for authentication to the Microsoft Graph API.
+type Identity struct {
+	// Type of credentials used to authenticate to the Microsoft Graph API.
+	Type IdentityType `json:"type"`
+}
+
+const (
+	// IdentityTypeAzureServicePrincipalCredentials defines default IdentityType which uses client id/client secret pair for authentication
+	IdentityTypeAzureServicePrincipalCredentials IdentityType = "AzureServicePrincipalCredentials"
+	// IdentityTypeAzureWorkloadIdentityCredentials defines default IdentityType which uses workload identity credentials for authentication
+	IdentityTypeAzureWorkloadIdentityCredentials IdentityType = "AzureWorkloadIdentityCredentials"
+)
+
+// IdentityType controls type of credentials to use for authentication to the Microsoft Graph API.
+// Supported values: AzureServicePrincipalCredentials;AzureWorkloadIdentityCredentials
+type IdentityType string
