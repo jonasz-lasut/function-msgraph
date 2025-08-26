@@ -330,10 +330,13 @@ func (g *GraphQuery) initializeWorkloadIdentityProvider(azureCreds map[string]st
 		TokenFilePath: azureCreds[WorkloadIdentityCredentialPath],
 	}
 
+	// Defaults to the value of the environment variable AZURE_TENANT_ID
 	tenantID, found := azureCreds[TenantID]
 	if found {
 		options.TenantID = tenantID
 	}
+
+	// Defaults to the value of the environment variable AZURE_CLIENT_ID
 	clientID, found := azureCreds[ClientID]
 	if found {
 		options.ClientID = clientID
@@ -357,7 +360,7 @@ func (g *GraphQuery) initializeWorkloadIdentityProvider(azureCreds map[string]st
 func (g *GraphQuery) graphQuery(ctx context.Context, azureCreds map[string]string, in *v1beta1.Input) (interface{}, error) {
 	identityType := v1beta1.IdentityTypeAzureServicePrincipalCredentials
 
-	if in.Identity != nil {
+	if in.Identity != nil && in.Identity.Type != "" {
 		identityType = in.Identity.Type
 	}
 	// Create the Microsoft Graph client
