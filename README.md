@@ -54,10 +54,10 @@ stringData:
 ```
 
 #### Workload Identity Credentials
+AKS cluster needs to have workload identity enabled.
+The managed identity needs to have the Federated Identity Credential created: https://azure.github.io/azure-workload-identity/docs/topics/federated-identity-credential.html.
 
-The managed identity needs to have the Federated Identity Credential created: https://azure.github.io/azure-workload-identity/docs/topics/federated-identity-credential.html
-
-Credentials secret:
+##### Credentials secret:
 ```yaml
 apiVersion: v1
 kind: Secret
@@ -68,13 +68,13 @@ type: Opaque
 stringData:
   credentials: |
     {
-      "clientId": "your-client-id",
-      "tenantId": "your-tenant-id",
+      "clientId": "your-client-id", # optional
+      "tenantId": "your-tenant-id", # optional
       "federatedTokenFile": "/var/run/secrets/azure/tokens/azure-identity-token"
     }
 ```
 
-Function
+##### Function
 ```yaml
 apiVersion: pkg.crossplane.io/v1
 kind: Function
@@ -88,7 +88,7 @@ spec:
     name: upbound-function-msgraph
 ```
 
-DeploymentRuntimeConfig
+##### DeploymentRuntimeConfig
 ```yaml
 apiVersion: pkg.crossplane.io/v1beta1
 kind: DeploymentRuntimeConfig
@@ -275,6 +275,7 @@ spec:
 | `servicePrincipalsRef` | string | Reference to resolve a list of service principal names from `spec`, `status` or `context` (e.g., `spec.servicePrincipalConfig.names`) |
 | `target` | string | Required. Where to store the query results. Can be `status.<field>` or `context.<field>` |
 | `skipQueryWhenTargetHasData` | bool | Optional. When true, will skip the query if the target already has data |
+| `identity.type | string | Optional. Type of identity credentials to use. Valid values: `AzureServicePrincipalCredentials`, `AzureWorkloadIdentityCredentials`. Default is `AzureServicePrincipalCredentials` |
 
 ## Result Targets
 
@@ -336,6 +337,32 @@ kind: Input
 queryType: ServicePrincipalDetails
 servicePrincipalsRef: "spec.servicePrincipalConfig.names"  # Get service principal names from XR spec
 target: "status.servicePrincipals"
+```
+
+## Using Different Credentials
+
+### Using ServicePrincipal credentials
+
+#### Explicitly
+```yaml
+apiVersion: msgraph.fn.crossplane.io/v1alpha1
+kind: Input
+identity:
+  type: AzureServicePrincipalCredentials
+```
+
+#### Default
+```yaml
+apiVersion: msgraph.fn.crossplane.io/v1alpha1
+kind: Input
+```
+
+### Using Workload Identity Credentials
+```yaml
+apiVersion: msgraph.fn.crossplane.io/v1alpha1
+kind: Input
+identity:
+  type: AzureWorkloadIdentityCredentials
 ```
 
 ## References

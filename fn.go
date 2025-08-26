@@ -73,6 +73,7 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 		return rsp, nil //nolint:nilerr // errors are handled in rsp
 	}
 
+	fmt.Println("We're here")
 	// Validate and prepare input
 	if !f.validateAndPrepareInput(ctx, req, in, rsp) {
 		return rsp, nil // Early return if validation failed or query should be skipped
@@ -287,12 +288,12 @@ func (g *GraphQuery) createGraphClient(azureCreds map[string]string, identityTyp
 	case v1beta1.IdentityTypeAzureWorkloadIdentityCredentials:
 		authProvider, err = g.initializeWorkloadIdentityProvider(azureCreds)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to create auth provider")
+			return nil, errors.Wrap(err, "failed to initialize workload identity provider")
 		}
 	case v1beta1.IdentityTypeAzureServicePrincipalCredentials:
 		authProvider, err = g.initializeClientSecretProvider(azureCreds)
 		if err != nil {
-			return nil, errors.Wrap(err, "failed to create auth provider")
+			return nil, errors.Wrap(err, "failed to initialize service principal provider")
 		}
 	}
 
