@@ -73,7 +73,6 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 		return rsp, nil //nolint:nilerr // errors are handled in rsp
 	}
 
-	fmt.Println("We're here")
 	// Validate and prepare input
 	if !f.validateAndPrepareInput(ctx, req, in, rsp) {
 		return rsp, nil // Early return if validation failed or query should be skipped
