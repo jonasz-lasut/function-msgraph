@@ -17,6 +17,7 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/users"
 	"github.com/upbound/function-msgraph/input/v1beta1"
 	"google.golang.org/protobuf/types/known/structpb"
+	"k8s.io/utils/ptr"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
@@ -349,10 +350,10 @@ func (g *GraphQuery) validateUsers(ctx context.Context, client *msgraphsdk.Graph
 		if result.GetValue() != nil {
 			for _, user := range result.GetValue() {
 				userMap := map[string]interface{}{
-					"id":                user.GetId(),
-					"displayName":       user.GetDisplayName(),
-					"userPrincipalName": user.GetUserPrincipalName(),
-					"mail":              user.GetMail(),
+					"id":                ptr.Deref(user.GetId(), ""),
+					"displayName":       ptr.Deref(user.GetDisplayName(), ""),
+					"userPrincipalName": ptr.Deref(user.GetUserPrincipalName(), ""),
+					"mail":              ptr.Deref(user.GetMail(), ""),
 				}
 				results = append(results, userMap)
 			}
@@ -488,7 +489,7 @@ func (g *GraphQuery) processMember(member models.DirectoryObjectable) map[string
 		unknownType          = "unknown"
 	)
 
-	memberID := member.GetId()
+	memberID := ptr.Deref(member.GetId(), "")
 	additionalData := member.GetAdditionalData()
 
 	// Create basic member info
@@ -524,7 +525,7 @@ func (g *GraphQuery) processMember(member models.DirectoryObjectable) map[string
 	memberMap["type"] = memberType
 
 	// Extract display name
-	memberMap["displayName"] = g.extractDisplayName(member, *memberID)
+	memberMap["displayName"] = g.extractDisplayName(member, memberID)
 
 	// Extract type-specific properties
 	switch memberType {
@@ -604,9 +605,9 @@ func (g *GraphQuery) getGroupObjectIDs(ctx context.Context, client *msgraphsdk.G
 		if groupResult.GetValue() != nil && len(groupResult.GetValue()) > 0 {
 			for _, group := range groupResult.GetValue() {
 				groupMap := map[string]interface{}{
-					"id":          group.GetId(),
-					"displayName": group.GetDisplayName(),
-					"description": group.GetDescription(),
+					"id":          ptr.Deref(group.GetId(), ""),
+					"displayName": ptr.Deref(group.GetDisplayName(), ""),
+					"description": ptr.Deref(group.GetDescription(), ""),
 				}
 				results = append(results, groupMap)
 			}
@@ -649,10 +650,10 @@ func (g *GraphQuery) getServicePrincipalDetails(ctx context.Context, client *msg
 		if spResult.GetValue() != nil && len(spResult.GetValue()) > 0 {
 			for _, sp := range spResult.GetValue() {
 				spMap := map[string]interface{}{
-					"id":          sp.GetId(),
-					"appId":       sp.GetAppId(),
-					"displayName": sp.GetDisplayName(),
-					"description": sp.GetDescription(),
+					"id":          ptr.Deref(sp.GetId(), ""),
+					"appId":       ptr.Deref(sp.GetAppId(), ""),
+					"displayName": ptr.Deref(sp.GetDisplayName(), ""),
+					"description": ptr.Deref(sp.GetDescription(), ""),
 				}
 				results = append(results, spMap)
 			}
