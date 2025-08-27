@@ -27,6 +27,22 @@ import (
 	"github.com/crossplane/function-sdk-go/response"
 )
 
+var (
+	// MSGraphScopes defines the default MS Graph scopes
+	MSGraphScopes = []string{"https://graph.microsoft.com/.default"}
+)
+
+const (
+	// TenantID defines the azure credentials key for tenant id
+	TenantID = "tenantId"
+	// ClientID defines the azure credentials key for client id
+	ClientID = "clientId"
+	// ClientSecret defines the azure credentials key for client secret
+	ClientSecret = "clientSecret"
+	// WorkloadIdentityCredentialPath defines the azure credentials key for federated token file path
+	WorkloadIdentityCredentialPath = "federatedTokenFile"
+)
+
 // GraphQueryInterface defines the methods required for querying Microsoft Graph API.
 type GraphQueryInterface interface {
 	graphQuery(ctx context.Context, azureCreds map[string]string, in *v1beta1.Input) (interface{}, error)
@@ -265,21 +281,20 @@ type GraphQuery struct {
 }
 
 // createGraphClient initializes a Microsoft Graph client using the provided credentials
-func (g *GraphQuery) createGraphClient(azureCreds map[string]string) (*msgraphsdk.GraphServiceClient, error) {
-	tenantID := azureCreds["tenantId"]
-	clientID := azureCreds["clientId"]
-	clientSecret := azureCreds["clientSecret"]
+func (g *GraphQuery) createGraphClient(azureCreds map[string]string, identityType v1beta1.IdentityType) (client *msgraphsdk.GraphServiceClient, err error) {
+	authProvider := &azauth.AzureIdentityAuthenticationProvider{}
 
-	// Create Azure credential for Microsoft Graph
-	cred, err := azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to obtain credentials")
-	}
-
-	// Create authentication provider
-	authProvider, err := azauth.NewAzureIdentityAuthenticationProviderWithScopes(cred, []string{"https://graph.microsoft.com/.default"})
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to create auth provider")
+	switch identityType {
+	case v1beta1.IdentityTypeAzureWorkloadIdentityCredentials:
+		authProvider, err = g.initializeWorkloadIdentityProvider(azureCreds)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to initialize workload identity provider")
+		}
+	case v1beta1.IdentityTypeAzureServicePrincipalCredentials:
+		authProvider, err = g.initializeClientSecretProvider(azureCreds)
+		if err != nil {
+			return nil, errors.Wrap(err, "failed to initialize service principal provider")
+		}
 	}
 
 	// Create adapter
@@ -292,10 +307,65 @@ func (g *GraphQuery) createGraphClient(azureCreds map[string]string) (*msgraphsd
 	return msgraphsdk.NewGraphServiceClient(adapter), nil
 }
 
+func (g *GraphQuery) initializeClientSecretProvider(azureCreds map[string]string) (*azauth.AzureIdentityAuthenticationProvider, error) {
+	tenantID := azureCreds[TenantID]
+	clientID := azureCreds[ClientID]
+	clientSecret := azureCreds[ClientSecret]
+
+	// Create Azure credential for Microsoft Graph
+	cred, err := azidentity.NewClientSecretCredential(tenantID, clientID, clientSecret, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to obtain clientsecret credentials")
+	}
+	// Create authentication provider
+	authProvider, err := azauth.NewAzureIdentityAuthenticationProviderWithScopes(cred, MSGraphScopes)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create auth provider")
+	}
+
+	return authProvider, nil
+}
+
+func (g *GraphQuery) initializeWorkloadIdentityProvider(azureCreds map[string]string) (*azauth.AzureIdentityAuthenticationProvider, error) {
+	options := &azidentity.WorkloadIdentityCredentialOptions{
+		TokenFilePath: azureCreds[WorkloadIdentityCredentialPath],
+	}
+
+	// Defaults to the value of the environment variable AZURE_TENANT_ID
+	tenantID, found := azureCreds[TenantID]
+	if found {
+		options.TenantID = tenantID
+	}
+
+	// Defaults to the value of the environment variable AZURE_CLIENT_ID
+	clientID, found := azureCreds[ClientID]
+	if found {
+		options.ClientID = clientID
+	}
+
+	// Create Azure credential for Microsoft Graph
+	cred, err := azidentity.NewWorkloadIdentityCredential(options)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to obtain workloadidentity credentials")
+	}
+	// Create authentication provider
+	authProvider, err := azauth.NewAzureIdentityAuthenticationProviderWithScopes(cred, MSGraphScopes)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to create auth provider")
+	}
+
+	return authProvider, nil
+}
+
 // graphQuery is a concrete implementation that interacts with Microsoft Graph API.
 func (g *GraphQuery) graphQuery(ctx context.Context, azureCreds map[string]string, in *v1beta1.Input) (interface{}, error) {
+	identityType := v1beta1.IdentityTypeAzureServicePrincipalCredentials
+
+	if in.Identity != nil && in.Identity.Type != "" {
+		identityType = in.Identity.Type
+	}
 	// Create the Microsoft Graph client
-	client, err := g.createGraphClient(azureCreds)
+	client, err := g.createGraphClient(azureCreds, identityType)
 	if err != nil {
 		return nil, err
 	}

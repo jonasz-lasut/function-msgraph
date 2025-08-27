@@ -28,6 +28,12 @@ spec:
 
 ### Azure Credentials
 
+The service principal needs the following Microsoft Graph API permissions:
+- User.Read.All (for user validation)
+- Group.Read.All (for group operations)
+- Application.Read.All (for service principal details)
+
+#### Client Secret Credentials
 Create an Azure service principal with appropriate permissions to access Microsoft Graph API:
 
 ```yaml
@@ -47,10 +53,81 @@ stringData:
     }
 ```
 
-The service principal needs the following Microsoft Graph API permissions:
-- User.Read.All (for user validation)
-- Group.Read.All (for group operations)
-- Application.Read.All (for service principal details)
+#### Workload Identity Credentials
+AKS cluster needs to have workload identity enabled.
+The managed identity needs to have the Federated Identity Credential created: https://azure.github.io/azure-workload-identity/docs/topics/federated-identity-credential.html.
+
+##### Credentials secret:
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: azure-account-creds
+  namespace: crossplane-system
+type: Opaque
+stringData:
+  credentials: |
+    {
+      "clientId": "your-client-id", # optional
+      "tenantId": "your-tenant-id", # optional
+      "federatedTokenFile": "/var/run/secrets/azure/tokens/azure-identity-token"
+    }
+```
+
+##### Function
+```yaml
+apiVersion: pkg.crossplane.io/v1
+kind: Function
+metadata:
+  name: upbound-function-msgraph
+spec:
+  package: xpkg.upbound.io/upbound/function-msgraph:v0.2.0
+  runtimeConfigRef:
+    apiVersion: pkg.crossplane.io/v1beta1
+    kind: DeploymentRuntimeConfig
+    name: upbound-function-msgraph
+```
+
+##### DeploymentRuntimeConfig
+```yaml
+apiVersion: pkg.crossplane.io/v1beta1
+kind: DeploymentRuntimeConfig
+metadata:
+  name: upbound-function-msgraph
+spec: 
+  deploymentTemplate:
+    spec:
+      selector:
+        matchLabels:
+          azure.workload.identity/use: "true"
+          pkg.crossplane.io/function: "upbound-function-msgraph"
+      template:
+        metadata:
+          labels:
+            azure.workload.identity/use: "true"
+            pkg.crossplane.io/function: "upbound-function-msgraph"
+        spec:
+          containers:
+          - name: package-runtime
+            volumeMounts:
+            - mountPath: /var/run/secrets/azure/tokens
+              name: azure-identity-token
+              readOnly: true
+          serviceAccountName: "upbound-function-msgraph"
+          volumes:
+          - name: azure-identity-token
+            projected:
+              sources:
+              - serviceAccountToken:
+                  audience: api://AzureADTokenExchange
+                  expirationSeconds: 3600
+                  path: azure-identity-token
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        azure.workload.identity/client-id: "your-client-id"
+      name: "upbound-function-msgraph"
+```
 
 ## Examples
 
@@ -198,6 +275,7 @@ spec:
 | `servicePrincipalsRef` | string | Reference to resolve a list of service principal names from `spec`, `status` or `context` (e.g., `spec.servicePrincipalConfig.names`) |
 | `target` | string | Required. Where to store the query results. Can be `status.<field>` or `context.<field>` |
 | `skipQueryWhenTargetHasData` | bool | Optional. When true, will skip the query if the target already has data |
+| `identity.type | string | Optional. Type of identity credentials to use. Valid values: `AzureServicePrincipalCredentials`, `AzureWorkloadIdentityCredentials`. Default is `AzureServicePrincipalCredentials` |
 
 ## Result Targets
 
@@ -259,6 +337,32 @@ kind: Input
 queryType: ServicePrincipalDetails
 servicePrincipalsRef: "spec.servicePrincipalConfig.names"  # Get service principal names from XR spec
 target: "status.servicePrincipals"
+```
+
+## Using Different Credentials
+
+### Using ServicePrincipal credentials
+
+#### Explicitly
+```yaml
+apiVersion: msgraph.fn.crossplane.io/v1alpha1
+kind: Input
+identity:
+  type: AzureServicePrincipalCredentials
+```
+
+#### Default
+```yaml
+apiVersion: msgraph.fn.crossplane.io/v1alpha1
+kind: Input
+```
+
+### Using Workload Identity Credentials
+```yaml
+apiVersion: msgraph.fn.crossplane.io/v1alpha1
+kind: Input
+identity:
+  type: AzureWorkloadIdentityCredentials
 ```
 
 ## References

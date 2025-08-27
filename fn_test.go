@@ -2502,3 +2502,219 @@ func TestRunFunction(t *testing.T) {
 		})
 	}
 }
+
+func TestIdentityType(t *testing.T) {
+	var (
+		xr = `{
+				"apiVersion": "example.org/v1",
+				"kind": "XR",
+				"status": {
+					"groups": ["Developers", "Operations", "All Company"]
+				}}`
+		servicePrincipalCreds = &fnv1.CredentialData{
+			Data: map[string][]byte{
+				"credentials": []byte(`{
+"clientId": "test-client-id",
+"clientSecret": "test-client-secret",
+"subscriptionId": "test-subscription-id",
+"tenantId": "test-tenant-id"
+}`),
+			},
+		}
+		workloadIdentityCredentials = &fnv1.CredentialData{
+			Data: map[string][]byte{
+				"credentials": []byte(`{
+"federatedTokenFile": "/var/run/secrets/azure/tokens/azure-identity-token"
+}`),
+			},
+		}
+	)
+
+	type args struct {
+		ctx context.Context
+		req *fnv1.RunFunctionRequest
+	}
+	type want struct {
+		rsp *fnv1.RunFunctionResponse
+		err error
+	}
+
+	cases := map[string]struct {
+		reason string
+		args   args
+		want   want
+	}{
+		"AzureServicePrincipalCredentialsImplicit": {
+			reason: "The Function should default to identity.type AzureServicePrincipalCredentials",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "msgraph.fn.crossplane.io/v1alpha1",
+						"kind": "Input",
+						"queryType": "GroupObjectIDs",
+						"groupsRef": "status.groups",
+						"target": "status.groupObjectIDs"
+					}`),
+					Observed: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+					Credentials: map[string]*fnv1.Credentials{
+						"azure-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: servicePrincipalCreds},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Results: []*fnv1.Result{
+						{
+							Severity: fnv1.Severity_SEVERITY_FATAL,
+							Message:  `failed to initialize service principal provider: failed to obtain clientsecret credentials`,
+							Target:   fnv1.Target_TARGET_COMPOSITE.Enum(),
+						},
+					},
+					Desired: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+				},
+			},
+		},
+		"AzureServicePrincipalCredentialsExplicit": {
+			reason: "The Function should use ServicePrincipal credentials if identity.type is AzureServicePrincipalCredentials",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "msgraph.fn.crossplane.io/v1alpha1",
+						"kind": "Input",
+						"queryType": "GroupObjectIDs",
+						"groupsRef": "status.groups",
+						"target": "status.groupObjectIDs",
+						"identity": {
+							"type": "AzureServicePrincipalCredentials"
+						}
+					}`),
+					Observed: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+					Credentials: map[string]*fnv1.Credentials{
+						"azure-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: servicePrincipalCreds},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Results: []*fnv1.Result{
+						{
+							Severity: fnv1.Severity_SEVERITY_FATAL,
+							Message:  `failed to initialize service principal provider: failed to obtain clientsecret credentials`,
+							Target:   fnv1.Target_TARGET_COMPOSITE.Enum(),
+						},
+					},
+					Desired: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+				},
+			},
+		},
+		"AzureWorkloadIdentityCredentials": {
+			reason: "The Function should use Workload Identity credentials if identity.type is AzureWorkloadIdentityCredentials",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "msgraph.fn.crossplane.io/v1alpha1",
+						"kind": "Input",
+						"queryType": "GroupObjectIDs",
+						"groupsRef": "status.groups",
+						"target": "status.groupObjectIDs",
+						"identity": {
+							"type": "AzureWorkloadIdentityCredentials"
+						}
+					}`),
+					Observed: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+					Credentials: map[string]*fnv1.Credentials{
+						"azure-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: workloadIdentityCredentials},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Results: []*fnv1.Result{
+						{
+							Severity: fnv1.Severity_SEVERITY_FATAL,
+							Message:  `failed to initialize workload identity provider: failed to obtain workloadidentity credentials`,
+							Target:   fnv1.Target_TARGET_COMPOSITE.Enum(),
+						},
+					},
+					Desired: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(xr),
+						},
+					},
+				},
+			},
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			// Create mock responders for each type of query
+			mockQuery := &MockGraphQuery{
+				GraphQueryFunc: func(_ context.Context, _ map[string]string, in *v1beta1.Input) (interface{}, error) {
+					identityType := v1beta1.IdentityTypeAzureServicePrincipalCredentials
+
+					if in.Identity != nil && in.Identity.Type != "" {
+						identityType = in.Identity.Type
+					}
+
+					switch identityType {
+					case v1beta1.IdentityTypeAzureWorkloadIdentityCredentials:
+						return nil, errors.New("failed to initialize workload identity provider: failed to obtain workloadidentity credentials")
+					case v1beta1.IdentityTypeAzureServicePrincipalCredentials:
+						return nil, errors.New("failed to initialize service principal provider: failed to obtain clientsecret credentials")
+					default:
+						return nil, errors.Errorf("unsupported identity.type: %s", string(identityType))
+					}
+				},
+			}
+
+			f := &Function{
+				graphQuery: mockQuery,
+				log:        logging.NewNopLogger(),
+			}
+			rsp, err := f.RunFunction(tc.args.ctx, tc.args.req)
+
+			if diff := cmp.Diff(tc.want.rsp, rsp, protocmp.Transform()); diff != "" {
+				t.Errorf("%s\nf.RunFunction(...): -want rsp, +got rsp:\n%s", tc.reason, diff)
+			}
+
+			if diff := cmp.Diff(tc.want.err, err, cmpopts.EquateErrors()); diff != "" {
+				t.Errorf("%s\nf.RunFunction(...): -want err, +got err:\n%s", tc.reason, diff)
+			}
+		})
+	}
+}
