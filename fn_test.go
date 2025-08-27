@@ -10,6 +10,7 @@ import (
 	"github.com/upbound/function-msgraph/input/v1beta1"
 	"google.golang.org/protobuf/testing/protocmp"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"k8s.io/utils/ptr"
 
 	"github.com/crossplane/crossplane-runtime/pkg/errors"
 	"github.com/crossplane/crossplane-runtime/pkg/logging"
@@ -24,10 +25,6 @@ type MockGraphQuery struct {
 
 func (m *MockGraphQuery) graphQuery(ctx context.Context, azureCreds map[string]string, in *v1beta1.Input) (interface{}, error) {
 	return m.GraphQueryFunc(ctx, azureCreds, in)
-}
-
-func strPtr(s string) *string {
-	return &s
 }
 
 // TestResolveGroupsRef tests the functionality of resolving groupsRef from context, status, or spec
@@ -2312,7 +2309,7 @@ func TestRunFunction(t *testing.T) {
 					Conditions: []*fnv1.Condition{
 						{
 							Type:    "FunctionSkip",
-							Message: strPtr("Target already has data, skipped query to avoid throttling"),
+							Message: ptr.To("Target already has data, skipped query to avoid throttling"),
 							Status:  fnv1.Status_STATUS_CONDITION_TRUE,
 							Reason:  "SkippedQuery",
 							Target:  fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
