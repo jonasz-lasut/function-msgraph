@@ -24,6 +24,7 @@ import (
 	fnv1 "github.com/crossplane/function-sdk-go/proto/v1"
 	"github.com/crossplane/function-sdk-go/request"
 	"github.com/crossplane/function-sdk-go/resource"
+	"github.com/crossplane/function-sdk-go/resource/composite"
 	"github.com/crossplane/function-sdk-go/response"
 )
 
@@ -138,6 +139,13 @@ func (f *Function) getXRAndStatus(req *fnv1.RunFunctionRequest) (map[string]inte
 
 // getObservedAndDesired gets both observed and desired XR resources
 func (f *Function) getObservedAndDesired(req *fnv1.RunFunctionRequest) (*resource.Composite, *resource.Composite, error) {
+	if req.GetObserved().GetComposite() != nil {
+		return getObservedAndDesiredInComposition(req)
+	}
+	return getObservedAndDesiredInOperation(req)
+}
+
+func getObservedAndDesiredInComposition(req *fnv1.RunFunctionRequest) (*resource.Composite, *resource.Composite, error) {
 	oxr, err := request.GetObservedCompositeResource(req)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "cannot get observed composite resource")
@@ -147,6 +155,45 @@ func (f *Function) getObservedAndDesired(req *fnv1.RunFunctionRequest) (*resourc
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "cannot get desired composite resource")
 	}
+
+	return oxr, dxr, nil
+}
+
+func getObservedAndDesiredInOperation(req *fnv1.RunFunctionRequest) (*resource.Composite, *resource.Composite, error) {
+	rr, err := request.GetRequiredResources(req)
+	if err != nil {
+		return nil, nil, errors.Wrap(err, "operation: cannot get required resources")
+	}
+
+	rs, found := rr["ops.crossplane.io/watched-resource"]
+	if !found {
+		return nil, nil, fmt.Errorf("operation: no resource to process with name %s", "ops.crossplane.io/watched-resource")
+	}
+
+	if len(rs) != 1 {
+		return nil, nil, fmt.Errorf("operation: incorrect number of resources sent to the function. expected 1, got %d", len(rs))
+	}
+
+	r := rs[0]
+	if r.Resource == nil {
+		return nil, nil, errors.New("operation: Resource property in operation resource can not be nil")
+	}
+
+	if len(r.Resource.Object) == 0 {
+		return nil, nil, errors.New("operation: Resource.Object property in operation resource can not be empty")
+	}
+
+	oxr := &resource.Composite{
+		Resource:          composite.New(),
+		ConnectionDetails: make(resource.ConnectionDetails),
+	}
+	dxr := &resource.Composite{
+		Resource:          composite.New(),
+		ConnectionDetails: make(resource.ConnectionDetails),
+	}
+
+	oxr.Resource.Object = r.Resource.Object
+	dxr.Resource.Object = r.Resource.Object
 
 	return oxr, dxr, nil
 }
