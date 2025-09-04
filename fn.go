@@ -140,8 +140,10 @@ func (f *Function) getXRAndStatus(req *fnv1.RunFunctionRequest) (map[string]inte
 // getObservedAndDesired gets both observed and desired XR resources
 func (f *Function) getObservedAndDesired(req *fnv1.RunFunctionRequest) (*resource.Composite, *resource.Composite, error) {
 	if req.GetObserved().GetComposite() != nil {
+		f.log.Debug("triggered by composite resource")
 		return getObservedAndDesiredInComposition(req)
 	}
+	f.log.Debug("triggered by operation")
 	return getObservedAndDesiredInOperation(req)
 }
 

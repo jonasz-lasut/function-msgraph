@@ -365,6 +365,97 @@ identity:
   type: AzureWorkloadIdentityCredentials
 ```
 
+## Operations support
+function-msgraph support every kind of [operations](https://docs.crossplane.io/latest/operations/operation/), however CronOperations and WatchOperations are the most useful in context of graph queries.
+Check [examples](./example/operations/)
+
+### CronOperation
+CronOperation may be used to forcefully update XR's status in a predefined interval.
+That functionality may be especially useful for XRs that are business critical and should have the data refreshed without worrying about throttling.
+Supports only singular resource reference.
+
+```yaml
+apiVersion: ops.crossplane.io/v1alpha1
+kind: CronOperation
+metadata:
+  name: update-user-validation-for-critical-xr
+spec:
+  schedule: "*/5 * * * *" # Every 5 minutes
+  concurrencyPolicy: Forbid
+  successfulHistoryLimit: 5
+  failedHistoryLimit: 3
+  operationTemplate:
+    spec:
+      mode: Pipeline
+      pipeline:
+      - step: user-validation
+        functionRef:
+          name: function-msgraph
+        input:
+          apiVersion: msgraph.fn.crossplane.io/v1alpha1
+          kind: Input
+          queryType: UserValidation
+          # Replace these with actual users in your directory
+          users:
+            - "admin@example.onmicrosoft.com"
+            - "user@example.onmicrosoft.com"
+            - "yury@upbound.io"
+          target: "status.validatedUsers"
+          skipQueryWhenTargetHasData: false # Always query even if data is in status
+        credentials:
+          - name: azure-creds
+            source: Secret
+            secretRef:
+              namespace: upbound-system
+              name: azure-account-creds
+        requirements:
+          requiredResources:
+          - requirementName: ops.crossplane.io/watched-resource
+            apiVersion: example.crossplane.io/v1
+            kind: XR
+            name: business-critical-xr
+```
+### WatchOperation
+WatchOperation may be used to forcefully update XR's status based on match condition.
+For example it may be useful to refresh status in business critical XR's that are labeled with label `always-update: "true"`.
+```yaml
+apiVersion: ops.crossplane.io/v1alpha1
+kind: WatchOperation
+metadata:
+  name: update-user-validation-for-critical-xrs
+spec:
+  watch:
+    apiVersion: example.crossplane.io/v1
+    kind: XR
+    matchLabels:
+      always-update: "true"
+  concurrencyPolicy: Allow
+  operationTemplate:
+    spec:
+      mode: Pipeline
+      pipeline:
+      - step: user-validation
+        functionRef:
+          name: function-msgraph
+        input:
+          apiVersion: msgraph.fn.crossplane.io/v1alpha1
+          kind: Input
+          queryType: UserValidation
+          # Replace these with actual users in your directory
+          users:
+            - "admin@example.onmicrosoft.com"
+            - "user@example.onmicrosoft.com"
+            - "yury@upbound.io"
+          target: "status.validatedUsers"
+          skipQueryWhenTargetHasData: false # Always query even if data is in status
+        credentials:
+          - name: azure-creds
+            source: Secret
+            secretRef:
+              namespace: upbound-system
+              name: azure-account-creds
+```
+
 ## References
 
 - [Microsoft Graph API Overview](https://learn.microsoft.com/en-us/graph/api/overview?view=graph-rest-1.0)
