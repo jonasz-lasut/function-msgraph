@@ -27,6 +27,12 @@ func (m *MockGraphQuery) graphQuery(ctx context.Context, azureCreds map[string]s
 	return m.GraphQueryFunc(ctx, azureCreds, in)
 }
 
+type MockTimer struct{}
+
+func (MockTimer) now() string {
+	return "2025-01-01T00:00:00+01:00"
+}
+
 // TestResolveGroupsRef tests the functionality of resolving groupsRef from context, status, or spec
 func TestResolveGroupsRef(t *testing.T) {
 	var (
@@ -2634,8 +2640,8 @@ func TestRunFunction(t *testing.T) {
 				},
 			},
 		},
-		"OperationWithWatchedResourceWithoutDrift": {
-			reason: "The Function should set annotations on XR that notify user about lack of drift",
+		"OperationWithWatchedResourceQueryNoDrift": {
+			reason: "The Function should set annotations on XR that notify user about lack of drift in query results",
 			args: args{
 				ctx: context.Background(),
 				req: &fnv1.RunFunctionRequest{
@@ -2656,7 +2662,29 @@ func TestRunFunction(t *testing.T) {
 						"ops.crossplane.io/watched-resource": {
 							Items: []*fnv1.Resource{
 								{
-									Resource: resource.MustStructJSON(xr),
+									Resource: resource.MustStructJSON(`{
+										"apiVersion": "example.org/v1",
+										"kind": "XR",
+										"metadata": {
+											"name": "cool-xr",
+											"finalizers": [
+												"composite.apiextensions.crossplane.io"
+											]
+										},
+										"spec": {
+											"count": 2
+										},
+										"status": {
+											"validatedUsers": [
+												{
+													"id": "test-user-id",
+													"displayName": "Test User",
+													"userPrincipalName": "user@example.com",
+													"mail": "user@example.com"
+												}
+											]
+										}
+									}`),
 								},
 							},
 						},
@@ -2690,8 +2718,96 @@ func TestRunFunction(t *testing.T) {
 									"name": "cool-xr",
 									"finalizers": ["composite.apiextensions.crossplane.io"],
 									"annotations": {
-										"function-msgraph/operation-last-queried": "...",
-										"function-msgraph/operation-drift-detected": "false"
+										"function-msgraph/last-execution": "2025-01-01T00:00:00+01:00",
+										"function-msgraph/last-execution-query-drift-detected": "false"
+									}
+								}
+							}`),
+						},
+					},
+				},
+			},
+		},
+		"OperationWithWatchedResourceQueryDrift": {
+			reason: "The Function should set annotations on XR that notify user about drift in query results",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "msgraph.fn.crossplane.io/v1alpha1",
+						"kind": "Input",
+						"queryType": "UserValidation",
+						"users": ["user@example.com"],
+						"target": "status.validatedUsers"
+					}`),
+					Credentials: map[string]*fnv1.Credentials{
+						"azure-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: creds},
+						},
+					},
+					RequiredResources: map[string]*fnv1.Resources{
+						"ops.crossplane.io/watched-resource": {
+							Items: []*fnv1.Resource{
+								{
+									Resource: resource.MustStructJSON(`{
+										"apiVersion": "example.org/v1",
+										"kind": "XR",
+										"metadata": {
+											"name": "cool-xr",
+											"finalizers": [
+												"composite.apiextensions.crossplane.io"
+											]
+										},
+										"spec": {
+											"count": 2
+										},
+										"status": {
+											"validatedUsers": [
+												{
+													"id": "incorrect-id",
+													"displayName": "Another Display Name",
+													"userPrincipalName": "user@example.com",
+													"mail": "user@example.com"
+												}
+											]
+										}
+									}`),
+								},
+							},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Conditions: []*fnv1.Condition{
+						{
+							Type:   "FunctionSuccess",
+							Status: fnv1.Status_STATUS_CONDITION_TRUE,
+							Reason: "Success",
+							Target: fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
+						},
+					},
+					Results: []*fnv1.Result{
+						{
+							Severity: fnv1.Severity_SEVERITY_NORMAL,
+							Message:  `QueryType: "UserValidation"`,
+							Target:   fnv1.Target_TARGET_COMPOSITE.Enum(),
+						},
+					},
+					Desired: &fnv1.State{
+						Composite: &fnv1.Resource{
+							Resource: resource.MustStructJSON(`{
+								"apiVersion": "example.org/v1",
+								"kind": "XR",
+								"metadata": {
+									"name": "cool-xr",
+									"finalizers": ["composite.apiextensions.crossplane.io"],
+									"annotations": {
+										"function-msgraph/last-execution": "2025-01-01T00:00:00+01:00",
+										"function-msgraph/last-execution-query-drift-detected": "true"
 									}
 								}
 							}`),
@@ -2775,6 +2891,7 @@ func TestRunFunction(t *testing.T) {
 
 			f := &Function{
 				graphQuery: mockQuery,
+				timer:      &MockTimer{},
 				log:        logging.NewNopLogger(),
 			}
 			rsp, err := f.RunFunction(tc.args.ctx, tc.args.req)
@@ -2991,6 +3108,7 @@ func TestIdentityType(t *testing.T) {
 
 			f := &Function{
 				graphQuery: mockQuery,
+				timer:      &MockTimer{},
 				log:        logging.NewNopLogger(),
 			}
 			rsp, err := f.RunFunction(tc.args.ctx, tc.args.req)

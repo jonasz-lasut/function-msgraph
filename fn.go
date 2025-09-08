@@ -7,7 +7,9 @@ import (
 	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	azauth "github.com/microsoft/kiota-authentication-azure-go"
@@ -45,9 +47,21 @@ const (
 	WorkloadIdentityCredentialPath = "federatedTokenFile"
 )
 
+const (
+	// LastExecutionAnnotation notifies the user when was the last time that Operation has run the query
+	LastExecutionAnnotation = "function-msgraph/last-execution"
+	// LastExecutionQueryDriftDetectedAnnotation notifies the user that the drift was detected after Operation has run the query
+	LastExecutionQueryDriftDetectedAnnotation = "function-msgraph/last-execution-query-drift-detected"
+)
+
 // GraphQueryInterface defines the methods required for querying Microsoft Graph API.
 type GraphQueryInterface interface {
 	graphQuery(ctx context.Context, azureCreds map[string]string, in *v1beta1.Input) (interface{}, error)
+}
+
+// TimerInterface defines the methods required to generate the current timestamp
+type TimerInterface interface {
+	now() string
 }
 
 // Function returns whatever response you ask it to.
@@ -57,6 +71,8 @@ type Function struct {
 	graphQuery GraphQueryInterface
 
 	log logging.Logger
+
+	timer TimerInterface
 }
 
 // RunFunction runs the Function.
@@ -65,8 +81,11 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 
 	rsp := response.To(req, response.DefaultTTL)
 
+	// Check if pipeline runs as Composition or Operation
+	inOperation := (req.GetObserved().GetComposite() == nil)
+
 	// Initialize response with desired XR and preserve context
-	if err := f.initializeResponse(req, rsp); err != nil {
+	if err := f.initializeResponse(req, rsp, inOperation); err != nil {
 		return rsp, nil //nolint:nilerr // errors are handled in rsp
 	}
 
@@ -77,12 +96,12 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 	}
 
 	// Validate and prepare input
-	if !f.validateAndPrepareInput(ctx, req, in, rsp) {
+	if !f.validateAndPrepareInput(ctx, req, in, rsp, inOperation) {
 		return rsp, nil // Early return if validation failed or query should be skipped
 	}
 
 	// Execute the query and process results
-	if !f.executeAndProcessQuery(ctx, req, in, azureCreds, rsp) {
+	if !f.executeAndProcessQuery(ctx, req, in, azureCreds, rsp, inOperation) {
 		return rsp, nil // Error already handled in response
 	}
 
@@ -121,16 +140,16 @@ func (f *Function) parseInputAndCredentials(req *fnv1.RunFunctionRequest, rsp *f
 	return in, azureCreds, nil
 }
 
-// getXRAndStatus retrieves status and desired XR, handling initialization if needed
-func (f *Function) getXRAndStatus(req *fnv1.RunFunctionRequest) (map[string]interface{}, *resource.Composite, error) {
+// getDXRAndStatus retrieves status and desired XR, handling initialization if needed
+func (f *Function) getDXRAndStatus(req *fnv1.RunFunctionRequest, inOperation bool) (map[string]interface{}, *resource.Composite, error) {
 	// Get composite resources
-	oxr, dxr, err := f.getObservedAndDesired(req)
+	oxr, dxr, err := f.getObservedAndDesired(req, inOperation)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	// Initialize and copy data
-	f.initializeAndCopyData(oxr, dxr)
+	f.initializeAndCopyData(oxr, dxr, inOperation)
 
 	// Get status
 	xrStatus := f.getStatusFromResources(oxr, dxr)
@@ -138,9 +157,26 @@ func (f *Function) getXRAndStatus(req *fnv1.RunFunctionRequest) (map[string]inte
 	return xrStatus, dxr, nil
 }
 
+// getDXRAndStatus retrieves status and desired XR, handling initialization if needed
+func (f *Function) getOXRAndStatus(req *fnv1.RunFunctionRequest, inOperation bool) (map[string]interface{}, *resource.Composite, error) {
+	// Get composite resources
+	oxr, dxr, err := f.getObservedAndDesired(req, inOperation)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Initialize and copy data
+	f.initializeAndCopyData(oxr, dxr, inOperation)
+
+	// Get status
+	xrStatus := f.getStatusFromResources(oxr, dxr)
+
+	return xrStatus, oxr, nil
+}
+
 // getObservedAndDesired gets both observed and desired XR resources
-func (f *Function) getObservedAndDesired(req *fnv1.RunFunctionRequest) (*resource.Composite, *resource.Composite, error) {
-	if req.GetObserved().GetComposite() != nil {
+func (f *Function) getObservedAndDesired(req *fnv1.RunFunctionRequest, inOperation bool) (*resource.Composite, *resource.Composite, error) {
+	if !inOperation {
 		f.log.Debug("triggered by composite resource")
 		return getObservedAndDesiredInComposition(req)
 	}
@@ -198,13 +234,19 @@ func getObservedAndDesiredInOperation(req *fnv1.RunFunctionRequest) (*resource.C
 	}
 
 	oxr.Resource.Object = r.Resource.Object
-	dxr.Resource.Object = r.Resource.Object
+
+	// Preserve only apiVersion, kind and mMetadata from OXR
+	dxr.Resource.SetAPIVersion(oxr.Resource.GetAPIVersion())
+	dxr.Resource.SetKind(oxr.Resource.GetKind())
+	dxr.Resource.Object = map[string]interface{}{
+		"metadata": r.Resource.Object["metadata"],
+	}
 
 	return oxr, dxr, nil
 }
 
 // initializeAndCopyData initializes metadata and copies spec
-func (f *Function) initializeAndCopyData(oxr, dxr *resource.Composite) {
+func (f *Function) initializeAndCopyData(oxr, dxr *resource.Composite, inOperation bool) {
 	// Initialize dxr from oxr if needed
 	if dxr.Resource.GetKind() == "" {
 		dxr.Resource.SetAPIVersion(oxr.Resource.GetAPIVersion())
@@ -212,11 +254,13 @@ func (f *Function) initializeAndCopyData(oxr, dxr *resource.Composite) {
 		dxr.Resource.SetName(oxr.Resource.GetName())
 	}
 
-	// Copy spec from observed to desired XR to preserve it
-	xrSpec := make(map[string]interface{})
-	if err := oxr.Resource.GetValueInto("spec", &xrSpec); err == nil && len(xrSpec) > 0 {
-		if err := dxr.Resource.SetValue("spec", xrSpec); err != nil {
-			f.log.Debug("Cannot set spec in desired XR", "error", err)
+	if !inOperation {
+		// Copy spec from observed to desired XR to preserve it in Composition pipeline
+		xrSpec := make(map[string]interface{})
+		if err := oxr.Resource.GetValueInto("spec", &xrSpec); err == nil && len(xrSpec) > 0 {
+			if err := dxr.Resource.SetValue("spec", xrSpec); err != nil {
+				f.log.Debug("Cannot set spec in desired XR", "error", err)
+			}
 		}
 	}
 }
@@ -244,8 +288,8 @@ func (f *Function) getStatusFromResources(oxr, dxr *resource.Composite) map[stri
 }
 
 // checkStatusTargetHasData checks if the status target has data.
-func (f *Function) checkStatusTargetHasData(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
-	xrStatus, _, err := f.getXRAndStatus(req)
+func (f *Function) checkStatusTargetHasData(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
+	xrStatus, _, err := f.getOXRAndStatus(req, inOperation)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return true
@@ -285,7 +329,15 @@ func (f *Function) executeQuery(ctx context.Context, azureCreds map[string]strin
 }
 
 // processResults processes the query results.
-func (f *Function) processResults(req *fnv1.RunFunctionRequest, in *v1beta1.Input, results interface{}, rsp *fnv1.RunFunctionResponse) error {
+func (f *Function) processResults(req *fnv1.RunFunctionRequest, in *v1beta1.Input, results interface{}, rsp *fnv1.RunFunctionResponse, inOperation bool) error {
+	if inOperation {
+		hasDrifted := f.hasQueryResultDriftedFromTarget(req, in.Target, results)
+		err := f.putQueryResultToAnnotations(req, rsp, hasDrifted)
+		if err != nil {
+			response.Fatal(rsp, err)
+		}
+		return err
+	}
 	switch {
 	case strings.HasPrefix(in.Target, "status."):
 		err := f.putQueryResultToStatus(req, rsp, in, results)
@@ -867,9 +919,62 @@ func SetNestedKey(root map[string]interface{}, key string, value interface{}) er
 	return nil
 }
 
-// putQueryResultToStatus processes the query results to status
+// Timer is a concrete implementation of the TimerInterface
+// that generates current timestamp
+type Timer struct{}
+
+func (Timer) now() string {
+	return time.Now().Format(time.RFC3339)
+}
+
+// putQueryResultToAnnotations process the query results to annotations (only in Operation mode)
+func (f *Function) putQueryResultToAnnotations(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, driftDetected bool) error {
+	_, dxr, err := f.getDXRAndStatus(req, true)
+	if err != nil {
+		return err
+	}
+
+	annotations := dxr.Resource.GetAnnotations()
+	if annotations == nil {
+		// If annotations are nil initialize map which can hold both operation annotations
+		annotations = make(map[string]string, 2)
+	}
+	// Update the timestamp annotation
+	annotations[LastExecutionAnnotation] = f.timer.now()
+	// Set information about the drift
+	annotations[LastExecutionQueryDriftDetectedAnnotation] = strconv.FormatBool(driftDetected)
+
+	if err := dxr.Resource.SetValue("metadata.annotations", annotations); err != nil {
+		return errors.Wrap(err, "cannot update composite resource annotations")
+	}
+
+	// Save the updated desired composite resource
+	if err := response.SetDesiredCompositeResource(rsp, dxr); err != nil {
+		return errors.Wrapf(err, "cannot set desired composite resource in %T", rsp)
+	}
+	return nil
+}
+
+// hasQueryResultDriftedFromTarget
+func (f *Function) hasQueryResultDriftedFromTarget(req *fnv1.RunFunctionRequest, target string, results interface{}) bool {
+	_, oxr, err := f.getOXRAndStatus(req, true)
+	if err != nil {
+		f.log.Info("cannot get observed XR to check drift between results and target")
+		return true
+	}
+
+	observedValue, err := oxr.Resource.GetValue(target)
+	if err != nil {
+		f.log.Info("could not get value from observed XR to check drift between results and target")
+		return true
+	}
+
+	return !reflect.DeepEqual(observedValue, results)
+}
+
+// putQueryResultToStatus processes the query results to status (only in Composition mode)
 func (f *Function) putQueryResultToStatus(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, in *v1beta1.Input, results interface{}) error {
-	xrStatus, dxr, err := f.getXRAndStatus(req)
+	xrStatus, dxr, err := f.getDXRAndStatus(req, false)
 	if err != nil {
 		return err
 	}
@@ -971,15 +1076,15 @@ func targetHasData(data map[string]interface{}, key string) (bool, error) {
 }
 
 // propagateDesiredXR ensures the desired XR is properly propagated without changing existing data
-func (f *Function) propagateDesiredXR(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse) error {
-	xrStatus, dxr, err := f.getXRAndStatus(req)
+func (f *Function) propagateDesiredXR(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, inOperation bool) error {
+	xrStatus, dxr, err := f.getDXRAndStatus(req, inOperation)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return err
 	}
 
 	// Write any existing status back to dxr
-	if len(xrStatus) > 0 {
+	if len(xrStatus) > 0 && !inOperation {
 		if err := dxr.Resource.SetValue("status", xrStatus); err != nil {
 			f.log.Info("Error setting status in Desired XR", "error", err)
 			return err
@@ -1008,9 +1113,9 @@ func (f *Function) preserveContext(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFu
 }
 
 // initializeResponse initializes the response with desired XR and preserves context
-func (f *Function) initializeResponse(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse) error {
+func (f *Function) initializeResponse(req *fnv1.RunFunctionRequest, rsp *fnv1.RunFunctionResponse, inOperation bool) error {
 	// Ensure oxr to dxr gets propagated and we keep status around
-	if err := f.propagateDesiredXR(req, rsp); err != nil {
+	if err := f.propagateDesiredXR(req, rsp, inOperation); err != nil {
 		return err
 	}
 	// Ensure the context is preserved
@@ -1019,7 +1124,7 @@ func (f *Function) initializeResponse(req *fnv1.RunFunctionRequest, rsp *fnv1.Ru
 }
 
 // validateAndPrepareInput validates the input and prepares it for execution
-func (f *Function) validateAndPrepareInput(_ context.Context, req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) validateAndPrepareInput(_ context.Context, req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	// Check if target is valid
 	if !f.isValidTarget(in.Target) {
 		response.Fatal(rsp, errors.Errorf("Unrecognized target field: %s", in.Target))
@@ -1027,7 +1132,7 @@ func (f *Function) validateAndPrepareInput(_ context.Context, req *fnv1.RunFunct
 	}
 
 	// Check if we should skip the query
-	if f.shouldSkipQuery(req, in, rsp) {
+	if f.shouldSkipQuery(req, in, rsp, inOperation) {
 		// Set success condition
 		response.ConditionTrue(rsp, "FunctionSuccess", "Success").
 			TargetCompositeAndClaim()
@@ -1035,7 +1140,7 @@ func (f *Function) validateAndPrepareInput(_ context.Context, req *fnv1.RunFunct
 	}
 
 	// Process references based on query type
-	if !f.processReferences(req, in, rsp) {
+	if !f.processReferences(req, in, rsp, inOperation) {
 		return false
 	}
 
@@ -1043,28 +1148,28 @@ func (f *Function) validateAndPrepareInput(_ context.Context, req *fnv1.RunFunct
 }
 
 // processReferences handles resolving references like groupRef, groupsRef, usersRef, and servicePrincipalsRef
-func (f *Function) processReferences(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) processReferences(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	// Process references based on query type
 	switch in.QueryType {
 	case "GroupMembership":
-		return f.processGroupRef(req, in, rsp)
+		return f.processGroupRef(req, in, rsp, inOperation)
 	case "GroupObjectIDs":
-		return f.processGroupsRef(req, in, rsp)
+		return f.processGroupsRef(req, in, rsp, inOperation)
 	case "UserValidation":
-		return f.processUsersRef(req, in, rsp)
+		return f.processUsersRef(req, in, rsp, inOperation)
 	case "ServicePrincipalDetails":
-		return f.processServicePrincipalsRef(req, in, rsp)
+		return f.processServicePrincipalsRef(req, in, rsp, inOperation)
 	}
 	return true
 }
 
 // processGroupRef handles resolving the groupRef reference for GroupMembership query type
-func (f *Function) processGroupRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) processGroupRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	if in.GroupRef == nil || *in.GroupRef == "" {
 		return true
 	}
 
-	groupName, err := f.resolveGroupRef(req, in.GroupRef)
+	groupName, err := f.resolveGroupRef(req, in.GroupRef, inOperation)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return false
@@ -1075,12 +1180,12 @@ func (f *Function) processGroupRef(req *fnv1.RunFunctionRequest, in *v1beta1.Inp
 }
 
 // processGroupsRef handles resolving the groupsRef reference for GroupObjectIDs query type
-func (f *Function) processGroupsRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) processGroupsRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	if in.GroupsRef == nil || *in.GroupsRef == "" {
 		return true
 	}
 
-	groupNames, err := f.resolveGroupsRef(req, in.GroupsRef)
+	groupNames, err := f.resolveGroupsRef(req, in.GroupsRef, inOperation)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return false
@@ -1091,12 +1196,12 @@ func (f *Function) processGroupsRef(req *fnv1.RunFunctionRequest, in *v1beta1.In
 }
 
 // processUsersRef handles resolving the usersRef reference for UserValidation query type
-func (f *Function) processUsersRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) processUsersRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	if in.UsersRef == nil || *in.UsersRef == "" {
 		return true
 	}
 
-	userNames, err := f.resolveUsersRef(req, in.UsersRef)
+	userNames, err := f.resolveUsersRef(req, in.UsersRef, inOperation)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return false
@@ -1107,12 +1212,12 @@ func (f *Function) processUsersRef(req *fnv1.RunFunctionRequest, in *v1beta1.Inp
 }
 
 // processServicePrincipalsRef handles resolving the servicePrincipalsRef reference for ServicePrincipalDetails query type
-func (f *Function) processServicePrincipalsRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) processServicePrincipalsRef(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	if in.ServicePrincipalsRef == nil || *in.ServicePrincipalsRef == "" {
 		return true
 	}
 
-	spNames, err := f.resolveServicePrincipalsRef(req, in.ServicePrincipalsRef)
+	spNames, err := f.resolveServicePrincipalsRef(req, in.ServicePrincipalsRef, inOperation)
 	if err != nil {
 		response.Fatal(rsp, err)
 		return false
@@ -1123,7 +1228,7 @@ func (f *Function) processServicePrincipalsRef(req *fnv1.RunFunctionRequest, in 
 }
 
 // executeAndProcessQuery executes the query and processes the results
-func (f *Function) executeAndProcessQuery(ctx context.Context, req *fnv1.RunFunctionRequest, in *v1beta1.Input, azureCreds map[string]string, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) executeAndProcessQuery(ctx context.Context, req *fnv1.RunFunctionRequest, in *v1beta1.Input, azureCreds map[string]string, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	// Execute the query
 	results, err := f.executeQuery(ctx, azureCreds, in, rsp)
 	if err != nil {
@@ -1131,7 +1236,7 @@ func (f *Function) executeAndProcessQuery(ctx context.Context, req *fnv1.RunFunc
 	}
 
 	// Process the results
-	if err := f.processResults(req, in, results, rsp); err != nil {
+	if err := f.processResults(req, in, results, rsp, inOperation); err != nil {
 		return false
 	}
 
@@ -1144,11 +1249,21 @@ func (f *Function) isValidTarget(target string) bool {
 }
 
 // shouldSkipQuery checks if the query should be skipped.
-func (f *Function) shouldSkipQuery(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse) bool {
+func (f *Function) shouldSkipQuery(req *fnv1.RunFunctionRequest, in *v1beta1.Input, rsp *fnv1.RunFunctionResponse, inOperation bool) bool {
 	// Determine if we should skip the query when target has data
 	var shouldSkipQueryWhenTargetHasData = false // Default to false to ensure continuous reconciliation
 	if in.SkipQueryWhenTargetHasData != nil {
 		shouldSkipQueryWhenTargetHasData = *in.SkipQueryWhenTargetHasData
+	}
+
+	// We should not skip if function is running as part of Operation
+	if inOperation {
+		return false
+	}
+
+	// We should not skip if Operation annotation is set to "true"
+	if f.queryDriftDetected(req, inOperation) {
+		return false
 	}
 
 	if !shouldSkipQueryWhenTargetHasData {
@@ -1157,12 +1272,32 @@ func (f *Function) shouldSkipQuery(req *fnv1.RunFunctionRequest, in *v1beta1.Inp
 
 	switch {
 	case strings.HasPrefix(in.Target, "status."):
-		return f.checkStatusTargetHasData(req, in, rsp)
+		return f.checkStatusTargetHasData(req, in, rsp, inOperation)
 	case strings.HasPrefix(in.Target, "context."):
 		return f.checkContextTargetHasData(req, in, rsp)
 	}
 
 	return false
+}
+
+func (f *Function) queryDriftDetected(req *fnv1.RunFunctionRequest, inOperation bool) bool {
+	_, oxr, err := f.getOXRAndStatus(req, inOperation)
+	if err != nil {
+		f.log.Info("cannot get observed XR to check drift from annotations")
+		return false
+	}
+
+	annotations := oxr.Resource.GetAnnotations()
+	driftStr, found := annotations[LastExecutionQueryDriftDetectedAnnotation]
+	if !found {
+		return false
+	}
+
+	drift, err := strconv.ParseBool(driftStr)
+	if err != nil {
+		f.log.Info("annotation notyfing about detected query drift has been manually modified and is of incorrect type", "annotation", LastExecutionQueryDriftDetectedAnnotation, "value", driftStr)
+	}
+	return drift
 }
 
 // checkContextTargetHasData checks if the context target has data.
@@ -1182,7 +1317,7 @@ func (f *Function) checkContextTargetHasData(req *fnv1.RunFunctionRequest, in *v
 }
 
 // resolveGroupRef resolves the group name from a reference in spec, status or context.
-func (f *Function) resolveGroupRef(req *fnv1.RunFunctionRequest, groupRef *string) (string, error) {
+func (f *Function) resolveGroupRef(req *fnv1.RunFunctionRequest, groupRef *string, inOperation bool) (string, error) {
 	if groupRef == nil || *groupRef == "" {
 		return "", errors.New("empty groupRef provided")
 	}
@@ -1192,19 +1327,19 @@ func (f *Function) resolveGroupRef(req *fnv1.RunFunctionRequest, groupRef *strin
 	// Use a proper switch statement instead of if-else chain
 	switch {
 	case strings.HasPrefix(refKey, "status."):
-		return f.resolveFromStatus(req, refKey)
+		return f.resolveFromStatus(req, refKey, inOperation)
 	case strings.HasPrefix(refKey, "context."):
 		return f.resolveFromContext(req, refKey)
 	case strings.HasPrefix(refKey, "spec."):
-		return f.resolveFromSpec(req, refKey)
+		return f.resolveFromSpec(req, refKey, inOperation)
 	default:
 		return "", errors.Errorf("unsupported groupRef format: %s", refKey)
 	}
 }
 
 // resolveFromStatus resolves a reference from XR status
-func (f *Function) resolveFromStatus(req *fnv1.RunFunctionRequest, refKey string) (string, error) {
-	xrStatus, _, err := f.getXRAndStatus(req)
+func (f *Function) resolveFromStatus(req *fnv1.RunFunctionRequest, refKey string, inOperation bool) (string, error) {
+	xrStatus, _, err := f.getOXRAndStatus(req, inOperation)
 	if err != nil {
 		return "", errors.Wrap(err, "cannot get XR status")
 	}
@@ -1229,16 +1364,16 @@ func (f *Function) resolveFromContext(req *fnv1.RunFunctionRequest, refKey strin
 }
 
 // resolveFromSpec resolves a reference from XR spec
-func (f *Function) resolveFromSpec(req *fnv1.RunFunctionRequest, refKey string) (string, error) {
-	// Use getXRAndStatus to ensure spec is copied to desired XR
-	_, dxr, err := f.getXRAndStatus(req)
+func (f *Function) resolveFromSpec(req *fnv1.RunFunctionRequest, refKey string, inOperation bool) (string, error) {
+	// Use getOXRAndStatus to ensure spec is taken from observed XR which always has full object
+	_, oxr, err := f.getOXRAndStatus(req, inOperation)
 	if err != nil {
-		return "", errors.Wrap(err, "cannot get XR status and desired XR")
+		return "", errors.Wrap(err, "cannot get XR status and observed XR")
 	}
 
-	// Get spec from the desired XR (which now has the spec copied from observed)
+	// Get spec from the observed XR
 	xrSpec := make(map[string]interface{})
-	err = dxr.Resource.GetValueInto("spec", &xrSpec)
+	err = oxr.Resource.GetValueInto("spec", &xrSpec)
 	if err != nil {
 		return "", errors.Wrap(err, "cannot get XR spec")
 	}
@@ -1252,7 +1387,7 @@ func (f *Function) resolveFromSpec(req *fnv1.RunFunctionRequest, refKey string) 
 }
 
 // resolveStringArrayRef resolves a list of string values from a reference in spec, status or context
-func (f *Function) resolveStringArrayRef(req *fnv1.RunFunctionRequest, ref *string, refType string) ([]*string, error) {
+func (f *Function) resolveStringArrayRef(req *fnv1.RunFunctionRequest, ref *string, refType string, inOperation bool) ([]*string, error) {
 	if ref == nil || *ref == "" {
 		return nil, errors.Errorf("empty %s provided", refType)
 	}
@@ -1267,11 +1402,11 @@ func (f *Function) resolveStringArrayRef(req *fnv1.RunFunctionRequest, ref *stri
 	// Use proper switch statement instead of if-else chain
 	switch {
 	case strings.HasPrefix(refKey, "status."):
-		result, err = f.resolveStringArrayFromStatus(req, refKey)
+		result, err = f.resolveStringArrayFromStatus(req, refKey, inOperation)
 	case strings.HasPrefix(refKey, "context."):
 		result, err = f.resolveStringArrayFromContext(req, refKey)
 	case strings.HasPrefix(refKey, "spec."):
-		result, err = f.resolveStringArrayFromSpec(req, refKey)
+		result, err = f.resolveStringArrayFromSpec(req, refKey, inOperation)
 	default:
 		return nil, errors.Errorf("unsupported %s format: %s", refType, refKey)
 	}
@@ -1287,8 +1422,8 @@ func (f *Function) resolveStringArrayRef(req *fnv1.RunFunctionRequest, ref *stri
 }
 
 // resolveStringArrayFromStatus resolves a list of string values from XR status
-func (f *Function) resolveStringArrayFromStatus(req *fnv1.RunFunctionRequest, refKey string) ([]*string, error) {
-	xrStatus, _, err := f.getXRAndStatus(req)
+func (f *Function) resolveStringArrayFromStatus(req *fnv1.RunFunctionRequest, refKey string, inOperation bool) ([]*string, error) {
+	xrStatus, _, err := f.getOXRAndStatus(req, inOperation)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot get XR status")
 	}
@@ -1305,16 +1440,15 @@ func (f *Function) resolveStringArrayFromContext(req *fnv1.RunFunctionRequest, r
 }
 
 // resolveStringArrayFromSpec resolves a list of string values from XR spec
-func (f *Function) resolveStringArrayFromSpec(req *fnv1.RunFunctionRequest, refKey string) ([]*string, error) {
-	// Use getXRAndStatus to ensure spec is copied to desired XR
-	_, dxr, err := f.getXRAndStatus(req)
+func (f *Function) resolveStringArrayFromSpec(req *fnv1.RunFunctionRequest, refKey string, inOperation bool) ([]*string, error) {
+	_, oxr, err := f.getOXRAndStatus(req, inOperation)
 	if err != nil {
-		return nil, errors.Wrap(err, "cannot get XR status and desired XR")
+		return nil, errors.Wrap(err, "cannot get XR status and observed XR")
 	}
 
-	// Get spec from the desired XR (which now has the spec copied from observed)
+	// Get spec from the observed XR (as desired XR may be part of the operation and have no spec)
 	xrSpec := make(map[string]interface{})
-	err = dxr.Resource.GetValueInto("spec", &xrSpec)
+	err = oxr.Resource.GetValueInto("spec", &xrSpec)
 	if err != nil {
 		return nil, errors.Wrap(err, "cannot get XR spec")
 	}
@@ -1324,18 +1458,18 @@ func (f *Function) resolveStringArrayFromSpec(req *fnv1.RunFunctionRequest, refK
 }
 
 // resolveGroupsRef resolves a list of group names from a reference in status or context
-func (f *Function) resolveGroupsRef(req *fnv1.RunFunctionRequest, groupsRef *string) ([]*string, error) {
-	return f.resolveStringArrayRef(req, groupsRef, "groupsRef")
+func (f *Function) resolveGroupsRef(req *fnv1.RunFunctionRequest, groupsRef *string, inOperation bool) ([]*string, error) {
+	return f.resolveStringArrayRef(req, groupsRef, "groupsRef", inOperation)
 }
 
 // resolveUsersRef resolves a list of user names from a reference in status or context
-func (f *Function) resolveUsersRef(req *fnv1.RunFunctionRequest, usersRef *string) ([]*string, error) {
-	return f.resolveStringArrayRef(req, usersRef, "usersRef")
+func (f *Function) resolveUsersRef(req *fnv1.RunFunctionRequest, usersRef *string, inOperation bool) ([]*string, error) {
+	return f.resolveStringArrayRef(req, usersRef, "usersRef", inOperation)
 }
 
 // resolveServicePrincipalsRef resolves a list of service principal names from a reference in status or context
-func (f *Function) resolveServicePrincipalsRef(req *fnv1.RunFunctionRequest, servicePrincipalsRef *string) ([]*string, error) {
-	return f.resolveStringArrayRef(req, servicePrincipalsRef, "servicePrincipalsRef")
+func (f *Function) resolveServicePrincipalsRef(req *fnv1.RunFunctionRequest, servicePrincipalsRef *string, inOperation bool) ([]*string, error) {
+	return f.resolveStringArrayRef(req, servicePrincipalsRef, "servicePrincipalsRef", inOperation)
 }
 
 // extractStringArrayFromMap extracts a string array from a map using nested key
