@@ -2710,19 +2710,20 @@ func TestRunFunction(t *testing.T) {
 						},
 					},
 					Desired: &fnv1.State{
-						Composite: &fnv1.Resource{
-							Resource: resource.MustStructJSON(`{
-								"apiVersion": "example.org/v1",
-								"kind": "XR",
-								"metadata": {
-									"name": "cool-xr",
-									"finalizers": ["composite.apiextensions.crossplane.io"],
-									"annotations": {
-										"function-msgraph/last-execution": "2025-01-01T00:00:00+01:00",
-										"function-msgraph/last-execution-query-drift-detected": "false"
+						Resources: map[string]*fnv1.Resource{
+							"xr": {
+								Resource: resource.MustStructJSON(`{
+									"apiVersion": "example.org/v1",
+									"kind": "XR",
+									"metadata": {
+										"name": "cool-xr",
+										"annotations": {
+											"function-msgraph/last-execution": "2025-01-01T00:00:00+01:00",
+											"function-msgraph/last-execution-query-drift-detected": "false"
+										}
 									}
-								}
-							}`),
+								}`),
+							},
 						},
 					},
 				},
@@ -2798,19 +2799,20 @@ func TestRunFunction(t *testing.T) {
 						},
 					},
 					Desired: &fnv1.State{
-						Composite: &fnv1.Resource{
-							Resource: resource.MustStructJSON(`{
-								"apiVersion": "example.org/v1",
-								"kind": "XR",
-								"metadata": {
-									"name": "cool-xr",
-									"finalizers": ["composite.apiextensions.crossplane.io"],
-									"annotations": {
-										"function-msgraph/last-execution": "2025-01-01T00:00:00+01:00",
-										"function-msgraph/last-execution-query-drift-detected": "true"
+						Resources: map[string]*fnv1.Resource{
+							"xr": {
+								Resource: resource.MustStructJSON(`{
+									"apiVersion": "example.org/v1",
+									"kind": "XR",
+									"metadata": {
+										"name": "cool-xr",
+										"annotations": {
+											"function-msgraph/last-execution": "2025-01-01T00:00:00+01:00",
+											"function-msgraph/last-execution-query-drift-detected": "true"
+										}
 									}
-								}
-							}`),
+								}`),
+							},
 						},
 					},
 				},

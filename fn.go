@@ -27,6 +27,7 @@ import (
 	fnv1 "github.com/crossplane/function-sdk-go/proto/v1"
 	"github.com/crossplane/function-sdk-go/request"
 	"github.com/crossplane/function-sdk-go/resource"
+	"github.com/crossplane/function-sdk-go/resource/composed"
 	"github.com/crossplane/function-sdk-go/resource/composite"
 	"github.com/crossplane/function-sdk-go/response"
 )
@@ -104,6 +105,8 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 	if !f.executeAndProcessQuery(ctx, req, in, azureCreds, rsp, inOperation) {
 		return rsp, nil // Error already handled in response
 	}
+
+	fmt.Println(rsp.Desired.Resources)
 
 	// Set success condition
 	response.ConditionTrue(rsp, "FunctionSuccess", "Success").
@@ -235,11 +238,15 @@ func getObservedAndDesiredInOperation(req *fnv1.RunFunctionRequest) (*resource.C
 
 	oxr.Resource.Object = r.Resource.Object
 
-	// Preserve only apiVersion, kind and mMetadata from OXR
+	// Preserve only apiVersion, kind and metadata.name, metadata.annotations from OXR
 	dxr.Resource.SetAPIVersion(oxr.Resource.GetAPIVersion())
 	dxr.Resource.SetKind(oxr.Resource.GetKind())
-	dxr.Resource.Object = map[string]interface{}{
-		"metadata": r.Resource.Object["metadata"],
+	dxr.Resource.SetName(oxr.Resource.GetName())
+	if oxrNs := oxr.Resource.GetNamespace(); oxrNs != "" {
+		dxr.Resource.SetNamespace(oxrNs)
+	}
+	if oxrAnnotations := oxr.Resource.GetAnnotations(); oxrAnnotations != nil {
+		dxr.Resource.SetAnnotations(oxrAnnotations)
 	}
 
 	return oxr, dxr, nil
@@ -335,8 +342,9 @@ func (f *Function) processResults(req *fnv1.RunFunctionRequest, in *v1beta1.Inpu
 		err := f.putQueryResultToAnnotations(req, rsp, hasDrifted)
 		if err != nil {
 			response.Fatal(rsp, err)
+			return err
 		}
-		return err
+		return nil
 	}
 	switch {
 	case strings.HasPrefix(in.Target, "status."):
@@ -949,9 +957,17 @@ func (f *Function) putQueryResultToAnnotations(req *fnv1.RunFunctionRequest, rsp
 	}
 
 	// Save the updated desired composite resource
-	if err := response.SetDesiredCompositeResource(rsp, dxr); err != nil {
+	dcds := map[resource.Name]*resource.DesiredComposed{
+		"xr": {
+			Resource: (*composed.Unstructured)(dxr.Resource),
+		},
+	}
+
+	if err := response.SetDesiredComposedResources(rsp, dcds); err != nil {
 		return errors.Wrapf(err, "cannot set desired composite resource in %T", rsp)
 	}
+	// In Operation only set rsp.Desired.Resources and not rsp.Desired.Composite
+	rsp.Desired.Composite = nil
 	return nil
 }
 
