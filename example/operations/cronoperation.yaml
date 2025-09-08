@@ -24,7 +24,6 @@ spec:
             - "user@example.onmicrosoft.com"
             - "yury@upbound.io"
           target: "status.validatedUsers"
-          skipQueryWhenTargetHasData: false # Always query even if data is in status
         credentials:
           - name: azure-creds
             source: Secret

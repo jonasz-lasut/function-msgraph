@@ -366,8 +366,23 @@ identity:
 ```
 
 ## Operations support
-function-msgraph support every kind of [operations](https://docs.crossplane.io/latest/operations/operation/), however CronOperations and WatchOperations are the most useful in context of graph queries.
-Check [examples](./example/operations/)
+function-msgraph support every kind of [operations](https://docs.crossplane.io/latest/operations/operation/) but it only allows targeting Composite Resources
+Function omits the input.skipQueryWhenTargetHasData parameter when running in operation mode to enforce compability with Cron/Watch modes.
+CronOperations and WatchOperations are the most useful in context of graph queries, please check [examples](./example/operations/).
+
+### Operations results
+function-msgraph operations result in two annotations set on the XR:
+```yaml
+apiVersion: "example.org/v1"
+kind: XR
+metadata:
+  name: "cool-xr"
+  annotations:
+    "function-msgraph/last-execution": "2025-01-01T00:00:00+01:00"
+    "function-msgraph/last-execution-query-drift-detected": "false"
+```
+function-msgraph/last-execution sets RFC3339 timestamp informing about last succesful Operation run.
+function-msgraph/last-execution-query-drift-detected sets a boolean if there's a drift between input.target field's value and query result, which is used by function-msgraph in Composition context for self-healing. skipQueryWhenTargetHasData input parameter is ommited when drift detected annotation is set which leads to XR update and after that next Operation run sets the annotation back to "false".
 
 ### CronOperation
 CronOperation may be used to forcefully update XR's status in a predefined interval.
@@ -401,7 +416,6 @@ spec:
             - "user@example.onmicrosoft.com"
             - "yury@upbound.io"
           target: "status.validatedUsers"
-          skipQueryWhenTargetHasData: false # Always query even if data is in status
         credentials:
           - name: azure-creds
             source: Secret
@@ -447,7 +461,6 @@ spec:
             - "user@example.onmicrosoft.com"
             - "yury@upbound.io"
           target: "status.validatedUsers"
-          skipQueryWhenTargetHasData: false # Always query even if data is in status
         credentials:
           - name: azure-creds
             source: Secret
