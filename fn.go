@@ -106,8 +106,6 @@ func (f *Function) RunFunction(ctx context.Context, req *fnv1.RunFunctionRequest
 		return rsp, nil // Error already handled in response
 	}
 
-	fmt.Println(rsp.Desired.Resources)
-
 	// Set success condition
 	response.ConditionTrue(rsp, "FunctionSuccess", "Success").
 		TargetCompositeAndClaim()

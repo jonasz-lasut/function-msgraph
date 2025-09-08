@@ -2729,6 +2729,99 @@ func TestRunFunction(t *testing.T) {
 				},
 			},
 		},
+		"OperationWithWatchedResourceQueryNoDriftWithExistingAnnotations": {
+			reason: "The Function should set annotations on XR that notify user about lack of drift in query results and in the same time not override existing annotations",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "msgraph.fn.crossplane.io/v1alpha1",
+						"kind": "Input",
+						"queryType": "UserValidation",
+						"users": ["user@example.com"],
+						"target": "status.validatedUsers"
+					}`),
+					Credentials: map[string]*fnv1.Credentials{
+						"azure-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: creds},
+						},
+					},
+					RequiredResources: map[string]*fnv1.Resources{
+						"ops.crossplane.io/watched-resource": {
+							Items: []*fnv1.Resource{
+								{
+									Resource: resource.MustStructJSON(`{
+										"apiVersion": "example.org/v1",
+										"kind": "XR",
+										"metadata": {
+											"name": "cool-xr",
+											"finalizers": [
+												"composite.apiextensions.crossplane.io"
+											],
+											"annotations": {
+												"my-cool-annotation": "love-msgraph"
+											}
+										},
+										"spec": {
+											"count": 2
+										},
+										"status": {
+											"validatedUsers": [
+												{
+													"id": "test-user-id",
+													"displayName": "Test User",
+													"userPrincipalName": "user@example.com",
+													"mail": "user@example.com"
+												}
+											]
+										}
+									}`),
+								},
+							},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Conditions: []*fnv1.Condition{
+						{
+							Type:   "FunctionSuccess",
+							Status: fnv1.Status_STATUS_CONDITION_TRUE,
+							Reason: "Success",
+							Target: fnv1.Target_TARGET_COMPOSITE_AND_CLAIM.Enum(),
+						},
+					},
+					Results: []*fnv1.Result{
+						{
+							Severity: fnv1.Severity_SEVERITY_NORMAL,
+							Message:  `QueryType: "UserValidation"`,
+							Target:   fnv1.Target_TARGET_COMPOSITE.Enum(),
+						},
+					},
+					Desired: &fnv1.State{
+						Resources: map[string]*fnv1.Resource{
+							"xr": {
+								Resource: resource.MustStructJSON(`{
+									"apiVersion": "example.org/v1",
+									"kind": "XR",
+									"metadata": {
+										"name": "cool-xr",
+										"annotations": {
+											"function-msgraph/last-execution": "2025-01-01T00:00:00+01:00",
+											"function-msgraph/last-execution-query-drift-detected": "false",
+											"my-cool-annotation": "love-msgraph"
+										}
+									}
+								}`),
+							},
+						},
+					},
+				},
+			},
+		},
 		"OperationWithWatchedResourceQueryDrift": {
 			reason: "The Function should set annotations on XR that notify user about drift in query results",
 			args: args{
