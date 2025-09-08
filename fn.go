@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -185,13 +186,15 @@ func getObservedAndDesiredInOperation(req *fnv1.RunFunctionRequest) (*resource.C
 		return nil, nil, errors.New("operation: Resource.Object property in operation resource can not be empty")
 	}
 
+	if !slices.Contains(r.Resource.GetFinalizers(), "composite.apiextensions.crossplane.io") {
+		return nil, nil, errors.New("operation: function-msgraph support only operations on composite resources")
+	}
+
 	oxr := &resource.Composite{
-		Resource:          composite.New(),
-		ConnectionDetails: make(resource.ConnectionDetails),
+		Resource: composite.New(),
 	}
 	dxr := &resource.Composite{
-		Resource:          composite.New(),
-		ConnectionDetails: make(resource.ConnectionDetails),
+		Resource: composite.New(),
 	}
 
 	oxr.Resource.Object = r.Resource.Object

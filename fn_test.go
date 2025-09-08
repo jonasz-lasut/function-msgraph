@@ -1622,7 +1622,7 @@ func TestResolveServicePrincipalsRef(t *testing.T) {
 func TestRunFunction(t *testing.T) {
 
 	var (
-		xr    = `{"apiVersion":"example.org/v1","kind":"XR","metadata":{"name":"cool-xr"},"spec":{"count":2}}`
+		xr    = `{"apiVersion":"example.org/v1","kind":"XR","metadata":{"name":"cool-xr","finalizers":["composite.apiextensions.crossplane.io"]},"spec":{"count":2}}`
 		creds = &fnv1.CredentialData{
 			Data: map[string][]byte{
 				"credentials": []byte(`{
@@ -2592,8 +2592,50 @@ func TestRunFunction(t *testing.T) {
 				},
 			},
 		},
-		"OperationWithWatchedResource": {
-			reason: "The Function should return fatal if it runs as operation watched resource with nil Resource",
+		"OperationWithWatchedResourceWhichIsNotXR": {
+			reason: "The Function should only allow operations on XRs based on finalizers",
+			args: args{
+				ctx: context.Background(),
+				req: &fnv1.RunFunctionRequest{
+					Meta: &fnv1.RequestMeta{Tag: "hello"},
+					Input: resource.MustStructJSON(`{
+						"apiVersion": "msgraph.fn.crossplane.io/v1alpha1",
+						"kind": "Input",
+						"queryType": "UserValidation",
+						"users": ["user@example.com"],
+						"target": "status.validatedUsers"
+					}`),
+					Credentials: map[string]*fnv1.Credentials{
+						"azure-creds": {
+							Source: &fnv1.Credentials_CredentialData{CredentialData: creds},
+						},
+					},
+					RequiredResources: map[string]*fnv1.Resources{
+						"ops.crossplane.io/watched-resource": {
+							Items: []*fnv1.Resource{
+								{
+									Resource: resource.MustStructJSON(`{"apiVersion":"example.org/v1","kind":"XR","metadata":{"name":"cool-xr"},"spec":{"count":2}}`),
+								},
+							},
+						},
+					},
+				},
+			},
+			want: want{
+				rsp: &fnv1.RunFunctionResponse{
+					Meta: &fnv1.ResponseMeta{Tag: "hello", Ttl: durationpb.New(response.DefaultTTL)},
+					Results: []*fnv1.Result{
+						{
+							Severity: fnv1.Severity_SEVERITY_FATAL,
+							Message:  "operation: function-msgraph support only operations on composite resources",
+							Target:   fnv1.Target_TARGET_COMPOSITE.Enum(),
+						},
+					},
+				},
+			},
+		},
+		"OperationWithWatchedResourceWithoutDrift": {
+			reason: "The Function should set annotations on XR that notify user about lack of drift",
 			args: args{
 				ctx: context.Background(),
 				req: &fnv1.RunFunctionRequest{
@@ -2645,20 +2687,12 @@ func TestRunFunction(t *testing.T) {
 								"apiVersion": "example.org/v1",
 								"kind": "XR",
 								"metadata": {
-									"name": "cool-xr"
-								},
-								"spec": {
-									"count": 2
-								},
-								"status": {
-									"validatedUsers": [
-										{
-											"id": "test-user-id",
-											"displayName": "Test User",
-											"userPrincipalName": "user@example.com",
-											"mail": "user@example.com"
-										}
-									]
+									"name": "cool-xr",
+									"finalizers": ["composite.apiextensions.crossplane.io"],
+									"annotations": {
+										"function-msgraph/operation-last-queried": "...",
+										"function-msgraph/operation-drift-detected": "false"
+									}
 								}
 							}`),
 						},
