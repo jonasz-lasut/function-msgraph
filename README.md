@@ -369,7 +369,22 @@ identity:
 function-msgraph support every kind of [operations](https://docs.crossplane.io/latest/operations/operation/) but it only allows targeting Composite Resources
 Function omits the input.skipQueryWhenTargetHasData parameter when running in operation mode to enforce compability with Cron/Watch modes.
 CronOperations and WatchOperations are the most useful in context of graph queries, please check [examples](./example/operations/).
+### Operations and Compositions Working Together
 
+**Important**: Operations and Compositions work in conjunction to provide a self-healing mechanism:
+
+1. **Operations Role (Drift Detection)**:
+   - Query Microsoft Graph API on schedule/watch events
+   - Compare results with current XR status
+   - Set drift detection annotations (but don't update status directly)
+
+2. **Compositions Role (Drift Correction)**:
+   - Run when XR is reconciled (triggered by annotation changes)
+   - Check drift detection annotation
+   - If drift detected, ignore `skipQueryWhenTargetHasData` flag and update status
+   - Reset drift annotation to "false" after successful update
+
+This creates a **two-phase self-healing system** where Operations monitor for changes and Compositions perform the actual data updates.
 ### Operations results
 function-msgraph operations result in two annotations set on the XR:
 ```yaml
